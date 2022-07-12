@@ -1,0 +1,85 @@
+#mask_name='VGG7_kc+simd_masks_94-77-76-32_multi_phased_3#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-77-76-32-100-0-76-32_multi_phased_7#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-77-76-32-100-0-76-32-100_multi_phased_8#.pickle'
+
+#mask_name='VGG7_kc+simd_masks_94-77-76-18-37-100-0-76-18-37-100_multi_phased_10#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-77-76-18-37-100_multi_phased_5#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-77-76-0_multi_phased_3#.pickle'
+
+#mask_name='VGG7_kc+simd_masks_94-77-76-18-37-100-0-76-18-37-100_multi_phased_10#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-77-76-18-37-100-0-76-18-37_multi_phased_9#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-77-76-18-37-100-0-76-18-37-100_multi_phased_10#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-77-76-18-37-100_multi_phased_5#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-77-76-0_multi_phased_3#.pickle'
+
+## Fine-5-phase
+#mask_name='VGG7_simd_masks_94-89_multi_phased_1#.pickle'
+#mask_name='VGG7_simd_masks_94-89-77_multi_phased_2#.pickle'
+#mask_name='VGG7_simd_masks_94-89-77-52_multi_phased_3#.pickle'
+
+## Coarse-Fine 5-phase
+#mask_name='VGG7_kc+simd_masks_94-88-83-0-82-50_multi_phased_5#.pickle'
+#tar_name='VGG7_kc+simd_94-88-83-41%_5#.tar'
+
+## Coarse-Fine 5-phase #2
+#mask_name='VGG7_kc+simd_masks_94-88-83-0-82-25-33-100_multi_phased_7#.pickle'
+#tar_name='VGG7_kc+simd_94-88-83-62-41-0%_7#.tar'
+
+## Fine-3-phase
+#mask_name='VGG7_simd_masks_94_pruned.pickle'
+#tar_name='VGG7_simd_94%_0#.tar'
+
+## Fine-3-phase
+#mask_name='VGG7_simd_masks_94-82_multi_phased_1#.pickle'
+#tar_name='VGG7_simd_94-82%_1#.tar'
+## Fine-5-phase
+#mask_name='VGG7_simd_masks_94-88_multi_phased_1#.pickle'
+#tar_name='VGG7_simd_94-88%_1#.tar'
+## Fine-7-phase
+#mask_name='VGG7_simd_masks_94-91_multi_phased_1#.pickle'
+#mask_name='VGG7_simd_masks_94-91-88-82-62-41_multi_phased_5#.pickle'
+#mask_name='VGG7_simd_masks_94-91-88-82-62-41-0_multi_phased_6#.pickle'
+#tar_name='VGG7_simd_94-91%_1#.tar'
+
+## Fine-7-phase
+#mask_name='VGG7_simd_masks_94-91_multi_phased_1#.pickle'
+#mask_name='VGG7_simd_masks_94-91-86_multi_phased_2#.pickle'
+#mask_name='VGG7_simd_masks_94-91-86-77_multi_phased_3#.pickle'
+#mask_name='VGG7_simd_masks_94-91-86-77-62_multi_phased_4#.pickle'
+#mask_name='VGG7_simd_masks_94-91-86-77-62-39_multi_phased_5#.pickle'
+
+#tar_name='VGG7_kc+simd_94-91-86-77-63-39-0%_6#.tar'
+#tar_name='VGG7_kc+simd_94-89-77-52-0%_4#.tar'
+#mask_name='VGG7_kc+simd_masks_94-77-76_multi_phased_2#.pickle'
+#tar_name='VGG7_kc+simd_94-89-77_2#.tar'
+#mask_name='VGG7_kc+simd_masks_94-77-76_multi_phased_2#.pickle'
+#tar_name='VGG7_kc+simd_'
+
+#mask_name='VGG7_kc+simd_masks_94-83-64-50_multi_phased_3#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-83-64-50-100-0-82-50_multi_phased_7#.pickle'
+
+#mask_name='VGG7_kc+simd_masks_94-83-64-25_multi_phased_3#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-83-64-25-33_multi_phased_4#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-83-64-25-33-100-0-82-25_multi_phased_8#.pickle'
+#mask_name='VGG7_kc+simd_masks_94-83-64-25-33-100-0-82-25-33_multi_phased_9#.pickle'
+#tar_name='VGG7_kc+simd_94-91-88-83-62-41%_5#.tar'
+
+## IEEE_for metadata checking
+#mask_name='VGG7_simd_masks_9_pruned.pickle'
+#mask_name='VGG7_simd_masks_19_pruned.pickle'
+#mask_name='VGG7_simd_masks_29_pruned.pickle'
+#mask_name='VGG7_simd_masks_39_pruned.pickle'
+#mask_name='VGG7_simd_masks_49_pruned.pickle'
+#mask_name='VGG7_simd_masks_59_pruned.pickle'
+#tar_name='VGG7_simd_59_pruned.tar'
+
+## IEEE ACCESS for metadata checking (jjg )
+mask_name='VGG11_CIFAR_BIG_kc_kc_info_0%_pruned.pickle'
+tar_name='VGG11_CIFAR_BIG_kc_0%_pruned.tar'
+
+#mask_name='VGG11_CIFAR_BIG_kc_kc_info_0%_pruned.pickle'
+#tar_name='VGG11_CIFAR_BIG_kc_0%_pruned.tar'
+
+#python ./make_metadata.py --Model VGG11_CIFAR_BIG --Mask_filename $mask_name
+tar -cvf ./metadata/$tar_name ./metadata/VGG11_CIFAR_BIGconv*.csv
+scp -P 9000 ./metadata/$tar_name moco@202.30.11.129:/home/moco/temp

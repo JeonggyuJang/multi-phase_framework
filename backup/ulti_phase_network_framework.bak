@@ -1,0 +1,571 @@
+"""
+Pruning a MLP by weights with one shot
+"""
+# Dependencies
+import sys
+import torch
+import torch.nn as nn
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
+import torchvision.models as models
+import argparse
+import time
+import numpy as np
+
+from zeroGradSGD import mySGD
+from torch.optim.lr_scheduler import LambdaLR, StepLR, MultiStepLR, ExponentialLR, CosineAnnealingLR, ReduceLROnPlateau
+from pruning.methods import weight_prune, layer_prune, simd_prune, KC_pruning, KC_initialize, KC_de_pruning
+from pruning.utils import weight_initialize, to_var, train, test, prune_rate, gen_grad_masks, vis_class, gen_inf_masks, data_save_pickle, data_load_pickle, vis_title_gen, save_metadata, print_specific_layer, count_specific_layer, log_to_txt
+from pruning.layers import MaskedLinear, MaskedConv2d
+
+from pprint import pprint # Print for dictionary
+
+# Hyperparameters
+log_file_name = 'log.txt'
+param = {
+    'pruning_perc': 90.,
+    'batch_size': 500,
+    'test_batch_size': 1,
+    'num_epochs': 800,
+    'learning_rate': 0.1,
+    #'weight_decay': 5e-4,
+    'weight_decay':2e-4,
+    'betas' : (0.9,0.999),
+    'eps' : 1e-8,
+    'de-pruning_perc' : 0
+}
+def main(train_opt, pruning_opt, pruning_method, retrain_opt, multi_phase_opt, multi_phase_count, vis_opt, NN_name, last_epoch, training_epoch,\
+        pruning_rate, dev, Train_batch, Test_batch, lr, dP_rate,test_opt, Maskfile_id, text, Meta_flag, kc_simd_flag, kc_from):
+
+    # Image preprocessing modules
+    transform_train = transforms.Compose([
+        transforms.Pad(4),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomCrop(32),
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+
+    # Setting Data loaders
+    print("\n==> Setting Data Loader for Training / Testing..")
+    train_dataset = datasets.CIFAR10(root='../data/',train=True, download=True,transform=transform_train)
+    loader_train = torch.utils.data.DataLoader(dataset=train_dataset,
+        batch_size=param['batch_size'], shuffle=True, num_workers=2)
+
+    test_dataset = datasets.CIFAR10(root='../data/', train=False, download=True,transform=transform_test)
+    loader_test = torch.utils.data.DataLoader(test_dataset,
+        batch_size=param['test_batch_size'], shuffle=True, num_workers=2)
+
+    # GPU Device setting
+    if dev != -1:   torch.cuda.set_device(dev)
+
+    # Hyper parameters setting
+    print("\n==> Setting Hyperparameters..")
+    param['num_epochs'] = training_epoch
+    param['pruning_perc'] = pruning_rate
+    param['batch_size'] = Train_batch
+    param['test_batch_size'] = Test_batch
+    param['learning_rate'] = lr
+    param['de-pruning_rate'] = float(dP_rate*0.01)
+    pprint(param)
+    ldict = locals()
+
+    # Model import
+    print("\n==> Model importing..")
+    print(" * Selected Model : {}".format(NN_name))
+    if pruning_method == 'kc' and multi_phase_opt == 1 or kc_simd_flag:
+        from models import VGG11_KC
+    else:
+        exec('from models import '+NN_name)
+
+    # Model Testing
+    print("\n==> Model Testing (Check for Accuracy & Execution Time)..")
+    if test_opt != None:
+        code = compile('net = '+NN_name+'()','<string>','single')
+        exec(code,globals(),ldict)
+        net = ldict['net']
+        print(' * Selected model is ' + str(type(net).__name__))
+        model_dict = net.state_dict()
+        pretrained_dict = torch.load('models/'+NN_name+'_'+test_opt+'.pkl')
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+        model_dict.update(pretrained_dict)
+        net.load_state_dict(model_dict)
+        print("\n==> Setting GPU..")
+        if torch.cuda.is_available():
+            print(' * Selected Single GPU : CUDA '+str(dev)+' enabled.')
+            net.cuda()
+            if dev == -1 :
+                print(' * Selected Multi GPU : CUDA [1, 2, 3] enabled (Default).')
+                net = nn.DataParallel(net, device_ids=[1,2,3])
+        time_sum, test_try = 0, 5
+        for i in range(test_try):
+            start_time = time.time()
+            test(net, loader_test)
+            ex_time = time.time() - start_time
+            print("<--- {} seconds for test #{} --->".format(ex_time, i))
+            time_sum += ex_time
+        print("<--- Testing finished,  Avg time (%s seconds) --->" %(time_sum/test_try))
+
+    # Training : SEQUENCE #1 
+    if train_opt == 1:
+        print("\n==> Model Training Setup : INITIAL TRAINING ")
+        code = compile('net = ' + NN_name + '()', '<string>', 'single')
+        exec(code,globals(),ldict)
+        net = ldict['net']
+        print(' * Selected model is '+str(type(net).__name__))
+        if last_epoch != 0 :
+            model_dict = net.state_dict()
+            pretrained_dict = torch.load('models/'+NN_name+'_'+str(last_epoch)+'.pkl')
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            model_dict.update(pretrained_dict)
+            net.load_state_dict(model_dict)
+        if torch.cuda.is_available():
+            print(' * Selected Single GPU : CUDA '+str(dev)+' enabled.')
+            net.cuda()
+            if dev == -1 :
+                print(' * Selected Multi GPU : CUDA 1, 2, 3 enabled (Default).')
+                net = nn.DataParallel(net, device_ids=[1,2,3])
+        criterion = nn.CrossEntropyLoss()
+        #optimizer = torch.optim.Adam(net.parameters(), lr=param['learning_rate'],betas=param['betas'],eps=param['eps'],weight_decay=param['weight_decay']) 
+        optimizer = torch.optim.SGD(net.parameters(), lr=param['learning_rate'],
+                                    weight_decay=param['weight_decay'],
+                                    momentum=0.9)
+        # lr_scheduler option_1 : StepLR
+        scheduler = StepLR(optimizer = optimizer, step_size = 150, gamma = 0.1)
+        # lr_scheduler option_2 : ReduceLROnPlateau
+        """ In order to use ReduceLROnPlateau, You have to change
+            1. ./pruning/utils.py scheduler.step() : This scheduler needs loss as argument
+        """
+        #scheduler = ReduceLROnPlateau(optimizer = optimizer, mode = 'min', factor = 0.3, patience = 10, verbose = True,\
+        #                              threshold = 1e-4, threshold_mode = 'rel', min_lr = 0.0000004)
+
+        # Visualization Setup
+        if vis_opt is 1:
+            viz = vis_class(title = vis_title_gen(NN_name, "Training", text))
+        else: viz = None
+        print("\n==> Training Start.. : INITIAL TRAINING")
+        train_time, nowtime_text =\
+                train(net, criterion, optimizer, scheduler, param, loader_train, NN_name, loader_test, viz=viz, last_epoch = last_epoch, multi_phase_opt = multi_phase_opt)
+        print('\n==> Training Finished. Trained Model will be saved ' + 'models/backup/' + NN_name + '_pretrained.pkl')
+        torch.save(net.state_dict(), 'models/backup/'+NN_name+'_pretrained.pkl')
+        log_to_txt(log_file_name, 'models/backup/'+NN_name+'_pretrained.pkl    '+str(train_time) + '/' + nowtime_text )
+
+    # Load Network to Pruning & Retraining
+    if pruning_opt != 0:
+        if pruning_method == 'kc' and multi_phase_opt == 1 or kc_simd_flag == 1:
+            print("\n==> Load Masks or Metadata before Pruning..")
+            # Load Masks to make gradient_masks
+            if multi_phase_count == 1: # Load Pruned pickle file
+                if kc_from is not None:
+                    pruned_net_info = data_load_pickle('./masks/' + NN_name + '_' + 'kc' + '_kc_info_' +str(kc_from)+'%'+ '_pruned.pickle')
+                    pprint(pruned_net_info)
+                else:
+                    pruned_net_info = data_load_pickle('./masks/' + NN_name + '_' + pruning_method + '_kc_info_' +str(Maskfile_id)+'%'+ '_pruned.pickle')
+                    pprint(pruned_net_info)
+            else: # Load Multi_phase_pickle
+                if kc_from is not None:
+                    pruned_net_info = data_load_pickle('./masks/' + NN_name + '_' + 'kc' + '_kc_info_' +str(kc_from)+'%'+ '_pruned.pickle')
+                else:
+                    pruned_net_info = data_load_pickle('./masks/' + NN_name+ '_' + pruning_method + '_kc_info_'\
+                                                   +str(Maskfile_id) + '_multi_phased_'+str(multi_phase_count-1)+'#.pickle')
+                pprint(pruned_net_info)
+            net2 = VGG11_KC(pruned_net_info['cfg_list'])
+
+        else:
+            code = compile('net2 = '+NN_name+'()','<string>','single')
+            exec(code,globals(),ldict)
+            net2 = ldict['net2']
+
+        if pruning_opt == 1:
+            print("\n==> Load Model file before Pruning.. : INITIAL PRUNING")
+            if kc_simd_flag == 1:
+                model_dict = net2.state_dict()
+                pretrained_dict = torch.load('models/'+NN_name+'_'+'kc'+'_pruned_'+str(Maskfile_id)+'%.pkl')
+                print(' * Model Loaded complete: ' + 'models/'+NN_name+'_'+'kc'+'_pruned_'+str(Maskfile_id)+'%.pkl')
+                pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+                model_dict.update(pretrained_dict)
+                net2.load_state_dict(model_dict)
+            else:
+                model_dict = net2.state_dict()
+                pretrained_dict = torch.load('models/'+NN_name+'_pretrained.pkl')
+                print(' * Model Loaded complete: ' + 'models/' + NN_name + '_pretrained.pkl')
+                pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+                model_dict.update(pretrained_dict)
+                net2.load_state_dict(model_dict)
+
+        # Load Pruned pkl Network to Multi-Phased De-Pruning
+        elif pruning_opt == 2:
+            print("\n==> Load Model file before Pruning.. : Multi-Phase PRUNING")
+            # First De-Pruning
+            if multi_phase_count == 0:
+                print(" !!ERROR!! You should set M_count >= 1 to begin Multi-Phase process.")
+                raise ValueError
+            if multi_phase_count == 1:
+                model_dict = net2.state_dict()
+                pretrained_dict = torch.load('models/'+NN_name+'_'+pruning_method+'_pruned_'+str(Maskfile_id)+'%.pkl')
+                print(' * Model Loaded complete: ' + 'models/'+NN_name+'_'+pruning_method+'_pruned_'+str(Maskfile_id)+'%.pkl')
+                pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+                model_dict.update(pretrained_dict)
+                net2.load_state_dict(model_dict)
+            elif multi_phase_count >= 1:
+                model_dict = net2.state_dict()
+                pretrained_dict = torch.load('models/'+NN_name+'_'+pruning_method+'_multi_phased_'+str(Maskfile_id)+'%_'+str(multi_phase_count-1)+'#.pkl')
+                print(' * Model Loaded complete: ' + 'models/'+NN_name+'_'+pruning_method+'_multi_phased_'+str(Maskfile_id)+'%_'+str(multi_phase_count-1)+'#.pkl')
+                pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+                model_dict.update(pretrained_dict)
+                net2.load_state_dict(model_dict)
+        if torch.cuda.is_available():
+            print(' * Selected Single GPU : CUDA '+str(dev)+' enabled.')
+            net.cuda()
+            if dev == -1 :
+                print(' * Selected Multi GPU : CUDA 1, 2, 3 enabled (Default).')
+                net = nn.DataParallel(net, device_ids=[1,2,3])
+        print("\n==> Simple Test for Loaded Network.. ")
+        test(net2, loader_test)
+
+    # Prune the weights
+        if multi_phase_opt == 0:
+            print("\n==> Pruning Process Begins.. : You selected {} pruning ".format(pruning_method))
+            if pruning_method == 'layer':
+                masks = layer_prune(net2, param['pruning_perc'])
+                net2.set_masks(masks, pruning_method)
+                total_prune_rate = prune_rate(net2)
+                print("<--- {}% parameters pruned --->".format(param['pruning_perc']))
+                data_save_pickle('./masks/' + NN_name + '_' + pruning_method + '_masks_' + str(int(total_prune_rate)) + '_pruned.pickle', masks)
+
+            elif pruning_method == 'simd':
+                masks, l2_masks = simd_prune(net2, param['pruning_perc'], RBS_MAX = 256)
+                save_metadata(masks, NN_name, multi_phase_opt, RBS_MAX=256)
+                if Meta_flag == 1:  raise ValueError
+                net2.set_masks(masks, pruning_method)
+                total_prune_rate = prune_rate(net2)
+                print("<--- {}% parameters pruned --->".format(param['pruning_perc']))
+                data_save_pickle('./masks/' + NN_name + '_' + pruning_method + '_masks_' + str(int(total_prune_rate)) + '_pruned.pickle', masks)
+
+            elif pruning_method == 'kc':
+                # Import Model to make kc_pruned
+                from models import VGG11_KC
+
+                # KC_pruning
+                pruned_weights_sequence, pruned_bias_sequence, pruned_net_info = KC_pruning(net2, param['pruning_perc'])
+                pprint(pruned_net_info)
+                cfg_list = pruned_net_info['cfg_list']
+                total_prune_rate = pruned_net_info['pruned_rate']
+
+                # Save info data to pickle
+                filename = './masks/' + NN_name + '_' + pruning_method + '_kc_info_'+ str(int(total_prune_rate))+ '%_'+ 'pruned.pickle'
+                data_save_pickle(filename, pruned_net_info)
+
+                # Build net_kc & Initializing
+                net2_kc = VGG11_KC(cfg_list)
+                KC_initialize(net2_kc, pruned_weights_sequence, pruned_bias_sequence)
+
+                if torch.cuda.is_available():
+                    net2_kc.cuda()
+            else:
+                print(" !!ERROR!! You Selected Wrong Pruning Method! {}x!", pruning_method)
+                raise ValueError
+
+        elif multi_phase_opt == 1:
+            print("\n==> MultiPhase Process Begins.. : You selected {} pruning".format(pruning_method))
+            if pruning_method == 'layer':
+                # Load Masks to make gradient_masks
+                if multi_phase_count == 1:
+                    masks = data_load_pickle('./masks/' + NN_name+ '_' + pruning_method + '_masks_' +str(Maskfile_id) + '_pruned.pickle')
+                else:
+                    masks = data_load_pickle('./masks/' + NN_name+ '_' + pruning_method + '_masks_' +str(Maskfile_id) + '_multi_phased_'+str(multi_phase_count-1)+'#.pickle')
+
+                # grad_masks Flipping and Generation
+                grad_masks = gen_grad_masks(masks, param['de-pruning_rate'], pruning_method, RBS_MAX = 256)
+
+                # net2 setting mask for inference usage
+                print(" * Generating Inference mask in MultiPhase option")
+                inference_masks = gen_inf_masks(masks, grad_masks)
+
+                net2.set_masks(inference_masks, pruning_method)
+                total_prune_rate = prune_rate(net2)
+                print("<--- {}% parameters added --->".format(param['de-pruning_rate']*100))
+                #data_save_pickle('./masks/'+NN_name+'_'+pruning_method+'_masks_'+str(int((1-param['de-pruning_rate'])*(total_prune_rate)))+\
+                #                 '_multi_phased_'+str(multi_phase_count)+'#.pickle', inference_masks)
+
+            elif pruning_method == 'simd':
+                # Load Masks to make gradient_masks
+                if multi_phase_count == 1:
+                    masks = data_load_pickle('./masks/' + NN_name+ '_' + pruning_method + '_masks_' +str(Maskfile_id) + '_pruned.pickle')
+                else:
+                    masks = data_load_pickle('./masks/' + NN_name+ '_' + pruning_method + '_masks_' +str(Maskfile_id) + '_multi_phased_'+str(multi_phase_count-1)+'#.pickle')
+
+                # grad_masks Flipping and Generation
+                grad_masks = gen_grad_masks(masks, param['de-pruning_rate'], pruning_method, RBS_MAX = 256)
+
+                # net2 setting mask for inference usage
+                print(" * Generating Inference mask in MultiPhase option")
+                inference_masks = gen_inf_masks(masks, grad_masks)
+                save_metadata(inference_masks, NN_name, multi_phase_opt, RBS_MAX=256)
+                if Meta_flag == 1:  raise ValueError
+                net2.set_masks(inference_masks, pruning_method)
+                print(" * Weight Initialize Process Begins....")
+                net2 = weight_initialize(net2, grad_masks, STD = 1e-10)
+                #print(net2.features[0].weight.cpu().detach().numpy()[-1])
+                total_prune_rate = prune_rate(net2)
+                print("<--- {}% parameters added --->".format(param['de-pruning_rate']*100))
+                #data_save_pickle('./masks/'+NN_name+'_'+pruning_method+'_masks_'+str(int((1-param['de-pruning_rate'])*(total_prune_rate)))+\
+                #                 '_multi_phased_'+str(multi_phase_count)+'#.pickle', inference_masks)
+
+            elif pruning_method == 'kc':
+                """
+                    Multi_Phase Process for KC
+                        - pruned_net_info : pruned_rate, cfg_list, pruned_shape_info, pruned_weights_sequence, pruned_bias_sequence
+                        - Multi_phase_kc -> cfg_list(Model define), Mask
+                """
+                masks, pruned_weights_sequence, pruned_bias_sequence,  pruned_net_info = KC_de_pruning(net2, pruned_net_info, param['de-pruning_rate'])
+                pprint(pruned_net_info)
+                # For Temporary Simd metadata Generation
+                if Meta_flag == 1:
+                    masks_temp, l2_masks = simd_prune(net2, 0, RBS_MAX = 256)
+                    save_metadata(masks_temp, NN_name, multi_phase_opt, RBS_MAX=256)
+                    raise ValueError
+
+                # Initialize Multi-phased Network
+                net2_kc = VGG11_KC(pruned_net_info['cfg_list'])
+                KC_initialize(net2_kc, pruned_weights_sequence, pruned_bias_sequence)
+                grad_masks = gen_grad_masks(masks, param['de-pruning_rate'], pruning_method)
+                # FIXME Is this prune_ratio represent only convolution layer??
+                total_prune_rate = pruned_net_info['pruned_rate']
+                print("--- {}% parameters added! ---".format(param['de-pruning_rate']))
+
+                if torch.cuda.is_available():
+                    net2_kc.cuda()
+
+                # Save info data to pickle
+                filename = './masks/' + NN_name + '_' + pruning_method + '_kc_info_'+str(Maskfile_id)+'-'+ str(int(total_prune_rate)) +\
+                            '_multi_phased_'+str(multi_phase_count)+'#.pickle'
+                data_save_pickle(filename, pruned_net_info)
+
+            else:
+                print(" !!ERROR!! You Selected Wrong Pruning Method! {}x!", pruning_method)
+                raise ValueError
+
+        print("\n==> Test after pruning")
+        if pruning_method == 'kc':  test(net2_kc, loader_test)
+        else:   test(net2, loader_test)
+
+    # Retraining : Optimizer Setup
+    if retrain_opt == 1:
+        criterion2 = nn.CrossEntropyLoss()
+        #optimizer2 = torch.optim.Adam(net2.parameters(), lr=param['learning_rate'],betas=param['betas'],eps=param['eps'],weight_decay=param['weight_decay']) 
+        if train_opt == 0 and multi_phase_opt == 0:
+            if pruning_method == 'kc':
+                optimizer2 = torch.optim.SGD(net2_kc.parameters(), lr=param['learning_rate'],
+                                            weight_decay=param['weight_decay'],
+                                            momentum=0.9)
+            else:
+                optimizer2 = torch.optim.SGD(net2.parameters(), lr=param['learning_rate'],
+                                            weight_decay=param['weight_decay'],
+                                            momentum=0.9)
+        elif train_opt == 0 and multi_phase_opt == 1:
+            if pruning_method == 'kc':
+                #optimizer2 = torch.optim.SGD(net2_kc.parameters(), lr=param['learning_rate'],\
+                #                            weight_decay=0,\
+                #                            momentum=0)
+                optimizer2 = mySGD(net2_kc.parameters(), lr=param['learning_rate'],\
+                                            weight_decay=param['weight_decay'],\
+                                            momentum=0.9)
+                #optimizer2 = torch.optim.SGD(net2_kc.parameters(), lr=param['learning_rate'],\
+                #                            weight_decay=param['weight_decay'],\
+                #                            momentum=0.9)
+            else:
+                optimizer2 = mySGD(net2.parameters(), lr=param['learning_rate'],\
+                                            weight_decay=param['weight_decay'],\
+                                            momentum=0.9)
+                #optimizer2 = torch.optim.SGD(net2.parameters(), lr=param['learning_rate'],\
+                #                             weight_decay=param['weight_decay'],\
+                #                             momentum=0.9)
+        elif train_opt == 1:
+            optimizer2 = torch.optim.SGD(net2.parameters(), lr=param['learning_rate'],
+                                        weight_decay=param['weight_decay'],
+                                        momentum=0.9)
+
+        # lr_scheduler : StepLR
+        scheduler2 = StepLR(optimizer = optimizer2, step_size = 200, gamma = 0.1)
+
+        # lr_sheduler : ReduceLROnPlateau
+        #scheduler2 = ReduceLROnPlateau(optimizer = optimizer,verbose = True, factor = 0.1)
+
+        if multi_phase_opt is 0:
+            # Visualization Setup
+            if vis_opt is 1:
+                viz = vis_class(title = vis_title_gen(NN_name, "Pruning_Retrain", text))
+            else: viz = None
+            if pruning_method == 'kc':
+                train_time, nowtime_text =\
+                train(net2_kc, criterion2, optimizer2, scheduler2, param, loader_train, NN_name, loader_test, viz=viz, last_epoch = last_epoch)
+            else:
+                train_time, nowtime_text =\
+                train(net2, criterion2, optimizer2, scheduler2, param, loader_train, NN_name, loader_test, viz=viz, last_epoch = last_epoch)
+
+        elif multi_phase_opt is 1:
+            # Visualization Setup
+            if vis_opt is 1:
+                viz = vis_class(title = vis_title_gen(NN_name, "MultiPhase_Retrain", text))
+            else: viz = None
+            if pruning_method == 'kc':
+                train_time, nowtime_text =\
+                train(net2_kc, criterion2, optimizer2, scheduler2, param, loader_train, NN_name,loader_test, grad_masks, multi_phase_opt, viz = viz, last_epoch = last_epoch)
+            else:
+                train_time, nowtime_text =\
+                train(net2, criterion2, optimizer2, scheduler2, param, loader_train, NN_name,loader_test, grad_masks, multi_phase_opt, viz = viz, last_epoch = last_epoch)
+
+    # Check accuracy and nonzeros weights in each layer After Retraining
+        print("\n==> Test after retraining")
+        if pruning_method == 'kc':  test(net2_kc, loader_test)
+        else:   test(net2, loader_test)
+
+        if pruning_method == 'kc':  total_prune_rate = pruned_net_info['pruned_rate']
+        else:   total_prune_rate = prune_rate(net2)
+
+    # Save and load the entire model After Retraining
+        print("\n==> Save model & masks after retraining.. ")
+        if pruning_opt == 1:
+            if pruning_method == 'kc':
+                torch.save(net2_kc.state_dict(), 'models/' + NN_name + "_" + pruning_method + '_pruned_' + str(int(total_prune_rate)) +'%.pkl')
+                log_to_txt(log_file_name, 'models/' + NN_name + "_" + pruning_method + '_pruned_' + str(int(total_prune_rate)) +'.pkl  ' + str(train_time) + '/' + nowtime_text )
+            else:
+                torch.save(net2.state_dict(), 'models/' + NN_name + "_" + pruning_method + '_pruned_' + str(int(total_prune_rate)) +'%.pkl')
+                log_to_txt(log_file_name, 'models/' + NN_name + "_" + pruning_method + '_pruned_' + str(int(total_prune_rate)) +'.pkl  ' + str(train_time) + '/' + nowtime_text )
+            print(' * Model save completed: '+'models/' + NN_name + "_" + pruning_method + '_pruned_' + str(int(total_prune_rate)) +'%.pkl')
+
+        elif pruning_opt == 2:
+            filename = 'models/' + NN_name + "_" + pruning_method + '_multi_phased_' + \
+                        str(Maskfile_id)+ '-' + str(int(total_prune_rate))+'%_' + str(multi_phase_count)+'#.pkl'
+            if pruning_method == 'kc':
+                torch.save(net2_kc.state_dict(), filename)
+                log_to_txt(log_file_name, filename + '  ' + str(train_time) + '/' + nowtime_text )
+            else:
+                data_save_pickle('./masks/'+NN_name+'_'+pruning_method+'_masks_'\
+                                 +str(Maskfile_id)+'-'+str(int(total_prune_rate))+'_multi_phased_'+str(multi_phase_count)+'#.pickle', inference_masks)
+                torch.save(net2.state_dict(), filename)
+                log_to_txt(log_file_name, filename + '  ' + str(train_time) + '/' + nowtime_text )
+            print(' * Model save completed: ' + filename)
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description = 'Multi-Phase Pruning & Retraining Framework')
+    parser.add_argument('--T',
+                        type = int,
+                        default = 0,
+                        help = 'Train Flag Option'
+                        )
+    parser.add_argument('--P',
+                        type = int,
+                        default = 0,
+                        help = 'Pruning Flag Option'
+                        )
+    parser.add_argument('--M',
+                        type = int,
+                        default = 0,
+                        help = 'MultiPhase Flag Option'
+                        )
+    parser.add_argument('--M_count',
+                        type = int,
+                        default = 0,
+                        help = 'MultiPhase Counting Parameter'
+                        )
+    parser.add_argument('--Method',
+                        type = str,
+                        default = 'layer',
+                        help = 'Pruning Method Select Flag'
+                        )
+    parser.add_argument('--R',
+                        type = int,
+                        default = 0,
+                        help = 'Retraining Flag Option'
+                        )
+    parser.add_argument('--Vis',
+                        type = int,
+                        default = 0,
+                        help = 'Visualization On / Off '
+                        )
+    parser.add_argument('--Model',
+                        type = str,
+                        default = None,
+                        help = 'Model name'
+                        )
+    parser.add_argument('--T_Epoch',
+                        type = int,
+                        default = 1000,
+                        help = 'Setting Parameter for Training Epoch'
+                        )
+    parser.add_argument('--L_Epoch',
+                        type = int,
+                        default = 0,
+                        help = 'Last epoch of selected model'
+                        )
+    parser.add_argument('--P_rate',
+                        type = float,
+                        default = 90.0,
+                        help = 'Pruning rate'
+                        )
+    parser.add_argument('--Dev',
+                        type = int,
+                        default = 0,
+                        help = 'GPU Selection'
+                        )
+    parser.add_argument('--Train_Batch',
+                        type = int,
+                        default = 500,
+                        help = 'Train Batch size'
+                        )
+    parser.add_argument('--Test_Batch',
+                        type = int,
+                        default = 500,
+                        help = 'Test Batch size'
+                        )
+    parser.add_argument('--lr',
+                        type = float,
+                        default = 0.1,
+                        help = 'initial learning rate'
+                        )
+    parser.add_argument('--dP_rate',
+                        type = int,
+                        default = 0,
+                        help = 'de-Pruning rate'
+                        )
+    parser.add_argument('--Test',
+                        type = str,
+                        default = None,
+                        help = 'Selected Model Test'
+                        )
+    parser.add_argument('--Mask',
+                        type = str,
+                        default = None,
+                        help = 'To loading Mask pickle file'
+                        )
+    parser.add_argument('--Text',
+                        type = str,
+                        default = "",
+                        help = 'Visdom Text Indexing'
+                        )
+    parser.add_argument('--Meta',
+                        type = int,
+                        default = 0,
+                        help = 'Generate Metadata in KC_Pruning'
+                        )
+    parser.add_argument('--Kc_simd',
+                        type = int,
+                        default = 0,
+                        help = 'Load KC and do simd'
+                        )
+    parser.add_argument('--Kc_from',
+                        type = str,
+                        default = None,
+                        help = 'Load KC_from sparsity'
+                        )
+    args = parser.parse_args()
+    main(args.T, args.P, args.Method,  args.R, args.M, args.M_count, args.Vis, args.Model, args.L_Epoch, args.T_Epoch, args.P_rate, args.Dev, args.Train_Batch,\
+        args.Test_Batch, args.lr, args.dP_rate, args.Test, args.Mask, args.Text, args.Meta, args.Kc_simd, args.Kc_from)
